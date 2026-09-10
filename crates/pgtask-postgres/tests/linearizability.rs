@@ -1213,7 +1213,6 @@ async fn signal_waits_are_linearizable() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "reproduces #23: wait_for_result loses wake-ups. Un-ignore with the fix in #29."]
 async fn result_waits_are_linearizable() {
     let Ok(database_url) = std::env::var("PGTASK_DATABASE_URL") else {
         return;
