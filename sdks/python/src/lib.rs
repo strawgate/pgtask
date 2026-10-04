@@ -51,6 +51,7 @@ struct PythonWorker {
     handlers: Mutex<Vec<PythonHandler>>,
     lease_duration: Duration,
     poll_interval: Duration,
+    shutdown_grace: Duration,
     health_address: Option<SocketAddr>,
     queues: Vec<QueueName>,
     shutdown: CancellationToken,
@@ -65,6 +66,7 @@ struct PythonWorkerOptions {
     listener_url: Option<String>,
     max_query_connections: u32,
     max_listener_connections: u32,
+    shutdown_grace: f64,
 }
 
 struct PythonFutureGuard {
@@ -355,6 +357,7 @@ impl PythonWorker {
             handlers: Mutex::new(Vec::new()),
             lease_duration: Duration::try_from_secs_f64(options.lease_duration).map_err(value_error)?,
             poll_interval: Duration::try_from_secs_f64(options.poll_interval).map_err(value_error)?,
+            shutdown_grace: Duration::try_from_secs_f64(options.shutdown_grace).map_err(value_error)?,
             health_address: options
                 .health_address
                 .map(|value| value.parse())
@@ -411,6 +414,7 @@ impl PythonWorker {
         let concurrency = self.concurrency;
         let lease_duration = self.lease_duration;
         let poll_interval = self.poll_interval;
+        let shutdown_grace = self.shutdown_grace;
         let health_address = self.health_address;
         let shutdown = self.shutdown.clone();
         pyo3_async_runtimes::tokio::future_into_py_with_locals(py, locals.clone(), async move {
@@ -433,6 +437,7 @@ impl PythonWorker {
             config.claim_batch_size = concurrency;
             config.lease_duration = lease_duration;
             config.poll_interval = poll_interval;
+            config.shutdown_grace = shutdown_grace;
             config.health_address = health_address;
             Worker::new(store, registry, config)
                 .map_err(runtime_error)?

@@ -74,6 +74,7 @@ def test_public_python_contract() -> None:
         "listener_url",
         "max_query_connections",
         "max_listener_connections",
+        "shutdown_grace",
     )
 
 
@@ -288,6 +289,8 @@ async def test_worker_configuration_rejects_invalid_values() -> None:
         Worker(database_url, empty, lease_duration=-1)
     with pytest.raises(ValueError):
         Worker(database_url, empty, health_address="not-an-address")
+    with pytest.raises(ValueError):
+        Worker(database_url, empty, shutdown_grace=-1)
 
     async def handler(task: Task, payload: None) -> None:
         assert task
@@ -562,3 +565,47 @@ async def test_ambient_task_is_reachable_from_any_frame_below_the_handler() -> N
     assert pgtask.get_current_task() is None
     worker.shutdown()
     await running
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stop", ["shutdown", "cancel"])
+async def test_python_worker_releases_unfinished_tasks_after_shutdown_grace(stop: str) -> None:
+    database_url = os.environ["PGTASK_DATABASE_URL"]
+    client = await Client.connect(database_url)
+    await client.migrate()
+    queue_name = f"python-release-{os.urandom(8).hex()}"
+    registry = TaskRegistry(queue_name)
+    started = asyncio.Event()
+
+    @registry.task("python.slow")
+    async def slow(task: Task, payload: None) -> None:
+        assert payload is None
+        started.set()
+        await asyncio.sleep(60)
+
+    handle = await client.enqueue(slow.request(None, max_attempts=1))
+    worker = Worker(database_url, registry, lease_duration=60.0, shutdown_grace=0.2)
+    running = asyncio.create_task(worker.run())
+    await asyncio.wait_for(started.wait(), timeout=5)
+    stopping = asyncio.get_running_loop().time()
+    if stop == "shutdown":
+        worker.shutdown()
+        await asyncio.wait_for(running, timeout=5)
+    else:
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(running, timeout=5)
+    # The grace period, not the 30 second default, bounded the stop.
+    assert asyncio.get_running_loop().time() - stopping < 5
+
+    released = await handle.inspect()
+    assert released is not None
+    assert released.state == "pending"
+    connection = await AsyncConnection.connect(database_url)
+    cursor = await connection.execute(
+        "SELECT failed_attempts, (SELECT state FROM pgtask.attempt_view WHERE task_id = tasks.id) "
+        "FROM pgtask.tasks WHERE id = %s",
+        (handle.id,),
+    )
+    assert await cursor.fetchone() == (0, "released")
+    await connection.close()
